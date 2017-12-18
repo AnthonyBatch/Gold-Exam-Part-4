@@ -1,0 +1,320 @@
+/*******************************************************************************************
+  Compiler Directives
+  (Uncomment and declare compiler directives as needed)
+*******************************************************************************************/
+// #ENABLE_DYNAMIC
+#SYMBOL_NAME "AMB - APC Switched PDU v1.0"
+// #HINT ""
+// #DEFINE_CONSTANT
+#CATEGORY "12" // System Control
+// #PRINT_TO_TRACE
+// #DIGITAL_EXPAND 
+// #ANALOG_SERIAL_EXPAND 
+// #OUTPUT_SHIFT 
+// #HELP_PDF_FILE ""
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ENABLE_TRACE
+#ENCODING_ASCII
+// #ENCODING_UTF16
+// #ENCODING_INHERIT_FROM_PARENT
+// #ENCODING_INHERIT_FROM_PROGRAM
+
+#HELP_BEGIN
+This module will control the PDU via Ethernet. Please use a TCP/IP Client to connect.
+Channel Active FB will automatically update after a command is sent with real feedback.
+TCP/IP client is closed after a 30sec timeout if not more commands are sent.
+To recieve an update on channel states without sending a channel command, please use
+'Update Status'.
+
+Telnet port: 23
+Username: apc
+Password: apc
+#HELP_END
+
+/*******************************************************************************************
+  DIGITAL, ANALOG and SERIAL INPUTS and OUTPUTS
+  (Uncomment and declare inputs and outputs as needed)
+*******************************************************************************************/
+DIGITAL_INPUT _skip_,_skip_, Update_Status, _skip_,  Channel_On[8], _skip_, Channel_Off[8], _skip_, Channel_Toggle[8], _skip_, Channel_Reboot[8,8]; 
+ANALOG_INPUT _skip_, IP_Status#;
+
+// STRING_INPUT 
+BUFFER_INPUT _skip_, From_Device$[1024]; 
+
+DIGITAL_OUTPUT _skip_, _skip_, Connect_IP,_skip_, Channel_Active_Fb[8], _skip_, Channel_Off_Fb[8,8]; 
+// ANALOG_OUTPUT 
+STRING_OUTPUT _skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,
+				_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,_skip_,To_Device$;
+
+
+/*******************************************************************************************
+  Parameters
+  (Uncomment and declare parameters as needed)
+*******************************************************************************************/
+// INTEGER_PARAMETER
+// SIGNED_INTEGER_PARAMETER
+// LONG_INTEGER_PARAMETER
+// SIGNED_LONG_INTEGER_PARAMETER
+STRING_PARAMETER Username[10], Password[10];
+
+
+/*******************************************************************************************
+  Global Variables
+  (Uncomment and declare global variables as needed)
+  Note:  Be sure to initialize all declared STRING variables as needed
+         For example, in Function Main: myString = "";
+*******************************************************************************************/
+INTEGER LoginOk, Busy, BusyP;
+// SIGNED_INTEGER
+// SIGNED_LONG_INTEGER
+STRING State$[6], Channel_ID$[2], Poll$[20], Stemp$[512], Recieved$[512];
+
+/*******************************************************************************************
+  Functions
+  (Add any additional functions here)
+  Note:  Functions must be physically placed before the location in
+         the code that calls them.
+*******************************************************************************************/
+
+Function CloseIP() //Close TCP/IP Client.
+{
+	Connect_IP = 0;
+	LoginOk = 0; 	
+}
+     
+Function DataSent() //Closes IP connection 30 secs after last string sent.
+{
+	Busy = 1;
+	Wait(3000, WaitTime)
+	{
+		CloseIP();
+		Busy = 0;
+	}	
+}
+
+Function ProcessReply(String Reply$) // Adds a delimiter to outgoing strings.
+{
+ 	Makestring (To_Device$, "%s\r", Reply$);
+	If(!Busy){
+		DataSent();
+	}
+	Else{
+		Retimewait(3000, WaitTime);
+	}
+}
+
+Function TelnetPrompt() // Telnet requires a line feed once connected to issue 'Username:' prompt.
+{
+	Makestring(To_Device$, "\x0A"); //send direct to tx$, does not need CR.
+}
+
+Function ProcessLogin(String Login$) //translates the correct replys from the parameter fields.
+{	
+	String Send$[50];
+
+	If(Find("User Name :", Login$) && LoginOk = 0)
+	{
+		ProcessReply(Username);
+	}
+	If(Find("Password  :", Login$) && LoginOk = 0)
+	{
+		Send$ = Password + "\x20-c";
+		ProcessReply(Send$); 	
+	}
+	If(Find("Unit ID:", Login$) && LoginOk = 0)
+	{
+    	LoginOk = 1;
+	}
+}
+
+Function SendCommand(String ChanPower$, String ChanID$) 
+{
+	String ChanCommand$[32];
+
+  	While(LoginOk = 0)
+	{
+		Wait(50);
+	}
+    ChanCommand$ = ChanPower$ + " " + ChanID$;
+	ProcessReply(ChanCommand$);
+	Wait(100);
+	Poll$ = "status " + ChanID$;
+	ProcessReply(Poll$);
+	If(ChanPower$ = "reboot")
+	{
+    	Wait(1000) //Reboot sequence takes approx. 15secs. Check after 20secs  
+		{
+			ProcessReply(Poll$);
+		}
+	}	 	
+}
+
+Function ProcessInput(String Input$) //Processes feedback from unit.
+{
+	Integer i, M1, M2, M3;
+	String outlet$[10];
+
+	If(Find("Connection Closed - Bye", Input$)) //If unit closes the connection, search for this response.
+	{
+     	CloseIP();
+	}
+	
+    If(Find("Outlet", Input$)) //Updates the Channel Active FB.
+	{
+        M1 = Find(":", Input$);		// will find the first '.' in value '.A1'
+		M2 = Find(":", Input$, M1 + 1);  
+		M3 = Byte(Input$, M2 + 9) - 48;	
+
+		For(i = 1 to 8)
+		{
+			//outlet$ = "Outlet " + itoa(i);
+			//M3 = Find(outlet$, Input$);
+
+			If(Find("\x20ON", Input$, M1) && M3 = i)
+			{
+            	Channel_Active_Fb[i] = 1;
+				Channel_Off_Fb[i] = 0;
+			}
+			Else If(Find("\x20OFF", Input$, M1) && M3 = i)
+			{
+            	Channel_Active_Fb[i] = 0;
+				Channel_Off_Fb[i] = 1;
+			} 	
+		}
+		//Clearbuffer(From_Device$);
+	}
+}
+
+Function UpdateStatus() //Requests the status off all channels when triggered.
+{
+	Integer x;
+
+	Connect_IP = 1;
+  	While(LoginOk = 0)
+	{
+		Wait(50);
+	}	
+	For(x = 1 to 8)
+	{
+   		Poll$ = "status " + itoa(x);
+		ProcessReply(Poll$);
+		Delay(100);  	
+	}
+}
+
+String_Function CheckChannel(Integer ToggleNo) // check the current channel state and return the toggle parameter needed.
+{
+	Integer z;
+	
+	For(z = 1 to 8)
+	{
+	 	If(ToggleNo = z)
+		{
+			If(Channel_Active_Fb[z] = 1)
+			{
+            	Return("off"); //If channel is on then return the opposite!
+			}
+			Else If(Channel_Active_Fb[z] = 0)
+			{
+    			Return("on"); //as above.
+			}
+		}
+	}
+}
+
+/*******************************************************************************************
+  Event Handlers
+  (Uncomment and declare additional event handlers as needed)
+*******************************************************************************************/
+
+PUSH Update_Status
+{
+    UpdateStatus();
+}
+
+PUSH Channel_On
+{
+	Connect_IP = 1;
+	State$ = "on";
+	Channel_ID$ = itoa(getlastmodifiedarrayindex());
+	SendCommand(State$, Channel_ID$);
+}
+
+PUSH Channel_Off
+{
+	Connect_IP = 1;
+	State$ = "off";
+	Channel_ID$ = itoa(getlastmodifiedarrayindex());
+	SendCommand(State$, Channel_ID$);
+}
+
+PUSH Channel_Toggle
+{
+	Connect_IP = 1;
+	State$ = CheckChannel(Getlastmodifiedarrayindex());
+	Channel_ID$ = itoa(getlastmodifiedarrayindex());
+	SendCommand(State$, Channel_ID$);
+}
+
+PUSH Channel_Reboot
+{
+	Connect_IP = 1;
+	State$ = "reboot";
+	Channel_ID$ = itoa(getlastmodifiedarrayindex());
+	SendCommand(State$, Channel_ID$);
+}
+
+CHANGE IP_Status#
+{
+ 	If(IP_Status# = 2)
+	{
+		TelnetPrompt();
+	}
+}
+
+CHANGE From_Device$
+{
+	If(!BusyP)
+	{
+    	BusyP = on;
+		If(LoginOk = 0)
+		{
+			While(Len(From_Device$)){
+				If(Find("User Name :", From_Device$) || Find("Password  :", From_Device$) || Find("Unit ID:", From_Device$))
+				{
+					Recieved$ = Gather(":", From_Device$);			
+					ProcessLogin(Recieved$);
+				}
+				Else{ClearBuffer(From_Device$);}
+			}
+		}
+    	Else If(LoginOk = 1)
+		{		
+			While(Len(From_Device$) && Find("APC>", From_Device$))
+			{
+				Recieved$ = Gather("APC>", From_Device$);
+	    		ProcessInput(Recieved$);
+			}			
+		}
+		BusyP = off;
+	}
+}
+
+
+
+/*******************************************************************************************
+  Main()
+  Uncomment and place one-time startup code here
+  (This code will get called when the system starts up)
+*******************************************************************************************/
+
+Function Main()
+{
+	LoginOk = 0;
+	Busy = off;
+	BusyP = off;
+}
+
+
+
